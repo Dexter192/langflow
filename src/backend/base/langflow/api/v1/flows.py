@@ -18,17 +18,20 @@ from fastapi_pagination import Page, Params
 from fastapi_pagination.ext.sqlalchemy import paginate
 from sqlmodel import and_, col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlalchemy import delete, or_
 
 from langflow.api.utils import CurrentActiveUser, DbSession, cascade_delete_flow, remove_api_keys, validate_is_component
 from langflow.api.v1.schemas import FlowListCreate
 from langflow.helpers.user import get_user_by_flow_id_or_endpoint_name
 from langflow.initial_setup.constants import STARTER_FOLDER_NAME
 from langflow.logging import logger
+from langflow.services.database.models.access_mapping import AccessMapping, AccessMappingRead, ItemTypeEnum, TargetTypeEnum, ShareItemRequest
 from langflow.services.database.models.flow import Flow, FlowCreate, FlowRead, FlowUpdate
 from langflow.services.database.models.flow.model import AccessTypeEnum, FlowHeader
 from langflow.services.database.models.flow.utils import get_webhook_component_in_flow
 from langflow.services.database.models.folder.constants import DEFAULT_FOLDER_NAME
 from langflow.services.database.models.folder.model import Folder
+from langflow.services.database.models.user.crud import get_user_by_id
 from langflow.services.deps import get_settings_service
 from langflow.services.settings.service import SettingsService
 from langflow.utils.compression import compress_response
@@ -223,8 +226,16 @@ async def read_flows(
                 (Flow.user_id == None) | (Flow.user_id == current_user.id)  # noqa: E711
             )
         else:
-            stmt = select(Flow).where(Flow.user_id == current_user.id)
-
+            stmt = select(Flow).join(
+                AccessMapping,
+                AccessMapping.item_id == Flow.id,
+                isouter=True
+            ).where(
+                    or_(
+                        Flow.user_id == current_user.id,
+                        AccessMapping.target_id == current_user.id
+                    )
+                )
         if remove_example_flows:
             stmt = stmt.where(Flow.folder_id != starter_folder_id)
 
@@ -363,6 +374,79 @@ async def update_flow(
 
     return db_flow
 
+@router.delete("/share/{flow_id}", status_code=200)
+async def share_flow(
+    *,
+    session: DbSession,
+    flow_id: UUID,
+    share_request: ShareItemRequest,
+    current_user: CurrentActiveUser,
+):
+    """Removes access from a user to a flow."""
+    settings_service = get_settings_service()
+    try:
+        db_flow = await _read_flow(
+            session=session,
+            flow_id=flow_id,
+            user_id=current_user.id,
+            settings_service=settings_service,
+        )
+        if not db_flow:
+            raise HTTPException(status_code=404, detail="Flow not found or user is not owner of flow")
+                
+        await session.exec(delete(AccessMapping).where(AccessMapping.item_id == flow_id).where(AccessMapping.target_id == share_request.target_id))
+        await session.commit()
+
+    except Exception as e:
+        if hasattr(e, "status_code"):
+            raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    return {"message": "Access removed successfully"}
+
+
+@router.post("/share/{flow_id}", response_model=AccessMappingRead, status_code=200)
+async def share_flow(
+    *,
+    session: DbSession,
+    flow_id: UUID,
+    share_request: ShareItemRequest,
+    current_user: CurrentActiveUser,
+):
+    """Shares a flow with a user."""
+    settings_service = get_settings_service()
+    try:
+        db_flow = await _read_flow(
+            session=session,
+            flow_id=flow_id,
+            user_id=current_user.id,
+            settings_service=settings_service,
+        )
+        if not db_flow:
+            raise HTTPException(status_code=404, detail="Flow not found")
+
+        target_user = await get_user_by_id(session, share_request.target_id)
+        if not target_user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        access_mapping = AccessMapping(item_id=db_flow.id,
+                                        item_type=ItemTypeEnum.flow,
+                                        target_id=target_user.id,
+                                        target_type=TargetTypeEnum.user)
+        
+        session.add(access_mapping)
+        await session.commit()
+        await session.refresh(access_mapping)
+
+    except Exception as e:
+        if "UNIQUE constraint failed" in str(e):
+            raise HTTPException(status_code=400, detail=f"item_id and target_id must be unique") from e
+        
+        if hasattr(e, "status_code"):
+            raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    return access_mapping
 
 @router.delete("/{flow_id}", status_code=200)
 async def delete_flow(

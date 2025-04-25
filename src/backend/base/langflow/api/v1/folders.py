@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 import zipfile
@@ -11,7 +12,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from fastapi_pagination import Params
 from fastapi_pagination.ext.sqlmodel import paginate
-from sqlalchemy import or_, update
+from sqlalchemy import or_, update, delete
 from sqlalchemy.orm import selectinload
 from sqlmodel import select
 
@@ -21,7 +22,9 @@ from langflow.api.v1.schemas import FlowListCreate
 from langflow.helpers.flow import generate_unique_flow_name
 from langflow.helpers.folders import generate_unique_folder_name
 from langflow.initial_setup.constants import STARTER_FOLDER_NAME
+from langflow.services.database.models.access_mapping import AccessMapping, AccessMappingRead, ItemTypeEnum, TargetTypeEnum, ShareItemRequest
 from langflow.services.database.models.flow.model import Flow, FlowCreate, FlowRead
+from langflow.services.database.models.access_mapping import AccessMapping, ItemTypeEnum, TargetTypeEnum
 from langflow.services.database.models.folder.constants import DEFAULT_FOLDER_NAME
 from langflow.services.database.models.folder.model import (
     Folder,
@@ -31,6 +34,7 @@ from langflow.services.database.models.folder.model import (
     FolderUpdate,
 )
 from langflow.services.database.models.folder.pagination_model import FolderWithPaginatedFlows
+from langflow.services.database.models.user.crud import get_user_by_id
 
 router = APIRouter(prefix="/folders", tags=["Folders"])
 
@@ -98,15 +102,43 @@ async def read_folders(
     current_user: CurrentActiveUser,
 ):
     try:
-        folders = (
-            await session.exec(
-                select(Folder).where(
-                    or_(Folder.user_id == current_user.id, Folder.user_id == None)  # noqa: E711
-                )
+        owned_folders = session.exec(
+            select(Folder).where(or_(Folder.user_id == current_user.id, Folder.user_id == None))  # noqa: E711
+        )
+        shared_folders = session.exec(
+            select(Folder).join(
+                AccessMapping,
+                AccessMapping.item_id == Folder.id
+            ).where(
+                AccessMapping.target_id == current_user.id,
+                AccessMapping.item_type == ItemTypeEnum.folder
             )
-        ).all()
-        folders = [folder for folder in folders if folder.name != STARTER_FOLDER_NAME]
-        return sorted(folders, key=lambda x: x.name != DEFAULT_FOLDER_NAME)
+        )
+        folders_with_shared_flows = session.exec(
+            select(Folder).join(
+                Flow,
+                Flow.folder_id == Folder.id
+            ).join(
+                AccessMapping,
+                AccessMapping.item_id == Flow.id
+            ).where(
+                AccessMapping.target_id == current_user.id,
+                AccessMapping.item_type == ItemTypeEnum.flow
+            )
+        )
+
+        owned_result, shared_result, shared_flows_result = await asyncio.gather(
+            owned_folders, shared_folders, folders_with_shared_flows
+        )
+
+        folders = (
+            owned_result.all()
+            + shared_result.all()
+            + shared_flows_result.all()
+        )
+        unique_folders = {folder.id: folder for folder in folders}.values()
+        filtered_folders = [f for f in unique_folders if f.name != STARTER_FOLDER_NAME]
+        return sorted(filtered_folders, key=lambda f: f.name != DEFAULT_FOLDER_NAME)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -123,25 +155,75 @@ async def read_folder(
     search: str = "",
 ):
     try:
-        folder = (
+        # TODO: Replace with load folder bit such that we can load folders that were not directly shared but at leas
+        # TODO: Check if folder exists and only throw exception if it does not
+        # Check if the ser is the owner of the folder or if the foler was shared with the user
+        owned_folder = (
             await session.exec(
                 select(Folder)
                 .options(selectinload(Folder.flows))
-                .where(Folder.id == folder_id, Folder.user_id == current_user.id)
+                .join(
+                    AccessMapping,
+                    AccessMapping.item_id == Folder.id,
+                    isouter=True
+                ).where(
+                    Folder.id == folder_id,
+                    or_(
+                        Folder.user_id == current_user.id,
+                        AccessMapping.target_id == current_user.id
+                    )
+                )
             )
         ).first()
+
+        shared_folder = (
+            await session.exec(
+                select(Folder)
+                .options(selectinload(Folder.flows))
+                .join(
+                    AccessMapping,
+                    AccessMapping.item_id == Folder.id,
+                    isouter=True
+                ).where(
+                        AccessMapping.item_id == folder_id,
+                        AccessMapping.target_id == current_user.id
+                    )
+                )
+        ).first()
+
+        folder_with_shared_flow = (
+            await session.exec(
+                select(Folder)
+                .options(selectinload(Folder.flows))
+                .join(
+                    AccessMapping,
+                    AccessMapping.target_id == current_user.id,
+                    isouter=True
+                )
+                .join(
+                    Flow,
+                    Flow.folder_id == Folder.id,
+                    isouter=True
+                )
+                .where(Folder.id == folder_id)
+            )
+        ).first()
+
     except Exception as e:
         if "No result found" in str(e):
             raise HTTPException(status_code=404, detail="Folder not found") from e
         raise HTTPException(status_code=500, detail=str(e)) from e
-
-    if not folder:
+    if not (owned_folder or shared_folder or folder_with_shared_flow):
         raise HTTPException(status_code=404, detail="Folder not found")
+
 
     try:
         if params and params.page and params.size:
             stmt = select(Flow).where(Flow.folder_id == folder_id)
 
+            # User is not the owner and folder was not shared
+            if (owned_folder is None or owned_folder.user_id != current_user.id) and shared_folder is None:
+                stmt = stmt.join(AccessMapping,AccessMapping.item_id == Flow.id).where(AccessMapping.target_id == current_user.id)    
             if Flow.updated_at is not None:
                 stmt = stmt.order_by(Flow.updated_at.desc())  # type: ignore[attr-defined]
             if is_component:
@@ -152,14 +234,15 @@ async def read_folder(
                 stmt = stmt.where(Flow.name.like(f"%{search}%"))  # type: ignore[attr-defined]
             paginated_flows = await paginate(session, stmt, params=params)
 
+            folder = owned_folder or shared_folder or folder_with_shared_flow
             return FolderWithPaginatedFlows(folder=FolderRead.model_validate(folder), flows=paginated_flows)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
-    flows_from_current_user_in_folder = [flow for flow in folder.flows if flow.user_id == current_user.id]
-    folder.flows = flows_from_current_user_in_folder
-    return folder
+    flows_from_current_user_in_folder = [flow for flow in owned_folder.flows if flow.user_id == current_user.id]
+    owned_folder.flows = flows_from_current_user_in_folder
+    return owned_folder
 
 
 @router.patch("/{folder_id}", response_model=FolderRead, status_code=200)
@@ -222,6 +305,71 @@ async def update_folder(
 
     return existing_folder
 
+@router.delete("/share/{folder_id}", status_code=200)
+async def share_folder(
+    *,
+    session: DbSession,
+    folder_id: UUID,
+    share_request: ShareItemRequest,
+    current_user: CurrentActiveUser,
+):
+    """Removes access from a user to a folder."""
+    try:
+        existing_folder = (
+            await session.exec(select(Folder).where(Folder.id == folder_id, Folder.user_id == current_user.id))
+        ).first()
+        if not existing_folder:
+            raise HTTPException(status_code=404, detail="Folder not found or user is not owner of folder")
+                
+        await session.exec(delete(AccessMapping).where(AccessMapping.item_id == existing_folder.id).where(AccessMapping.target_id == share_request.target_id))
+        await session.commit()
+
+    except Exception as e:
+        if hasattr(e, "status_code"):
+            raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    return {"message": "Access removed successfully"}
+
+
+@router.post("/share/{folder_id}", response_model=AccessMappingRead, status_code=200)
+async def share_folder(
+    *,
+    session: DbSession,
+    folder_id: UUID,
+    share_request: ShareItemRequest,
+    current_user: CurrentActiveUser,
+):
+    """Shares a folder with a user."""
+    try:
+        existing_folder = (
+            await session.exec(select(Folder).where(Folder.id == folder_id, Folder.user_id == current_user.id))
+        ).first()
+        if not existing_folder:
+            raise HTTPException(status_code=404, detail="Folder not found")
+
+        target_user = await get_user_by_id(session, share_request.target_id)
+        if not target_user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        access_mapping = AccessMapping(item_id=existing_folder.id,
+                                        item_type=ItemTypeEnum.folder,
+                                        target_id=target_user.id,
+                                        target_type=TargetTypeEnum.user)
+        
+        session.add(access_mapping)
+        await session.commit()
+        await session.refresh(access_mapping)
+        
+    except Exception as e:
+        if "UNIQUE constraint failed" in str(e):
+            raise HTTPException(status_code=400, detail=f"item_id and target_id must be unique") from e
+        
+        if hasattr(e, "status_code"):
+            raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    return access_mapping
 
 @router.delete("/{folder_id}", status_code=204)
 async def delete_folder(

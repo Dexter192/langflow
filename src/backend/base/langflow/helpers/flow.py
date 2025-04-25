@@ -34,8 +34,9 @@ async def list_flows(*, user_id: str | None = None) -> list[Data]:
         raise ValueError(msg)
     try:
         async with session_scope() as session:
-            uuid_user_id = UUID(user_id) if isinstance(user_id, str) else user_id
-            stmt = select(Flow).where(Flow.user_id == uuid_user_id).where(Flow.is_component == False)  # noqa: E712
+            uuid_user_id = UUID(user_id) if isinstance(
+                user_id, str) else user_id
+            stmt = select(Flow)  # .where(Flow.user_id == uuid_user_id).where(Flow.is_component == False)  # noqa: E712
             flows = (await session.exec(stmt)).all()
 
             return [flow.to_data() for flow in flows]
