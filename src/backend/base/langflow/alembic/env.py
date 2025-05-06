@@ -36,6 +36,10 @@ target_metadata.naming_convention = NAMING_CONVENTION
 # my_important_option = config.get_main_option("my_important_option")
 # ... etc.
 
+def include_object(object, name, type_, reflected, compare_to):
+    if name == "casbin_rule":
+        return False
+    return True
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode.
@@ -57,6 +61,7 @@ def run_migrations_offline() -> None:
         dialect_opts={"paramstyle": "named"},
         render_as_batch=True,
         prepare_threshold=None,
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -80,7 +85,7 @@ def _sqlite_do_begin(conn):
 
 def _do_run_migrations(connection):
     context.configure(
-        connection=connection, target_metadata=target_metadata, render_as_batch=True, prepare_threshold=None
+        connection=connection, target_metadata=target_metadata, render_as_batch=True, prepare_threshold=None, include_object=include_object,
     )
 
     with context.begin_transaction():
