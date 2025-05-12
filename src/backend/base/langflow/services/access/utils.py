@@ -9,7 +9,6 @@ def initialize_access_model(*kwargs) -> None:
     logger.debug("Initializing Casbin ruleset")
     from langflow.services.deps import get_access_service
 
-
     access_service: AccessService = get_access_service()
-    access_service.init_policy()
+    # access_service.init_policy()
     

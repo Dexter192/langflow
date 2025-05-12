@@ -3,14 +3,25 @@ from casbin.model import Model
 from casbin_sqlalchemy_adapter import Adapter
 
 from langflow.services.base import Service
-from langflow.services.database.service import DatabaseService
 from langflow.services.settings.service import SettingsService
+from langflow.services.database.service import DatabaseService
+from langflow.services.database.models.flow import Flow
+from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlmodel import select
+
+from typing import TYPE_CHECKING, Annotated
+from fastapi import Depends
+from langflow.services.deps import get_session
+from loguru import logger
+
+DbSession = Annotated[AsyncSession, Depends(get_session)]
 
 class AccessService(Service):
     name = "access_service"
     
-    def __init__(self, settings_service: DatabaseService):
+    def __init__(self, settings_service: SettingsService):
         self.settings_service = settings_service
+
         if settings_service.settings.database_url is None:
             msg = "No database URL provided"
             raise ValueError(msg)
@@ -21,8 +32,13 @@ class AccessService(Service):
         self.adapter = Adapter(self.database_url)
         self.enforcer = casbin.Enforcer(self.model, self.adapter)
 
-    def init_policy(self):
+    async def init_policy(self, session: AsyncSession):
         self.enforcer.clear_policy()
+        if self.enforcer.get_policy():
+            logger.debug("Casbin policy already migrated")
+            return
+        flows = (await session.exec(select(Flow))).all()
+        logger.debug(f"Flows: {flows}")
         # Admin can do everything
         self.enforcer.add_policy("r.sub.role == 'admin'", "True", "admin")
         # Editor can edit folder 1

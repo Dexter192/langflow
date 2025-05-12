@@ -15,8 +15,8 @@ class AccessServiceFactory(ServiceFactory):
         super().__init__(AccessService)
 
     def create(self, settings_service: SettingsService):
-        # Here you would have logic to create and configure a DatabaseService
         if not settings_service:
-            msg = "No database"
+            msg = "No settings service"
             raise ValueError(msg)
+        
         return AccessService(settings_service)
