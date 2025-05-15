@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from sqlmodel.ext.asyncio.session import AsyncSession
 
     from langflow.services.cache.service import AsyncBaseCacheService, CacheService
+    from langflow.services.access.service import AccessService
     from langflow.services.chat.service import ChatService
     from langflow.services.database.service import DatabaseService
     from langflow.services.job_queue.service import JobQueueService
@@ -141,6 +142,16 @@ def get_db_service() -> DatabaseService:
 
     return get_service(ServiceType.DATABASE_SERVICE, DatabaseServiceFactory())
 
+def get_access_service() -> AccessService:
+    """Retrieves the AccessService instance from the service manager.
+
+    Returns:
+        The AccessService instance.
+
+    """
+    from langflow.services.access.factory import AccessServiceFactory
+
+    return get_service(ServiceType.ACCESS_SERVICE, AccessServiceFactory())
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     """Retrieves an async session from the database service.

@@ -9,6 +9,7 @@ from sqlalchemy import exc as sqlalchemy_exc
 from sqlmodel import col, select
 
 from langflow.services.auth.utils import create_super_user, verify_password
+from langflow.services.access.utils import initialize_access_model
 from langflow.services.cache.base import ExternalAsyncBaseCacheService
 from langflow.services.cache.factory import CacheServiceFactory
 from langflow.services.database.models.transactions.model import TransactionTable
@@ -17,7 +18,7 @@ from langflow.services.database.utils import initialize_database
 from langflow.services.schema import ServiceType
 from langflow.services.settings.constants import DEFAULT_SUPERUSER, DEFAULT_SUPERUSER_PASSWORD
 
-from .deps import get_db_service, get_service, get_settings_service
+from .deps import get_db_service, get_service, get_settings_service, get_access_service
 
 if TYPE_CHECKING:
     from sqlmodel.ext.asyncio.session import AsyncSession
@@ -237,8 +238,15 @@ async def initialize_services(*, fix_migration: bool = False) -> None:
 
     # Setup the superuser
     await initialize_database(fix_migration=fix_migration)
+    
     db_service = get_db_service()
     await db_service.initialize_alembic_log_file()
+    
+    initialize_access_model()
+    access_service = get_access_service()
+    async with db_service.with_session() as session:
+        await access_service.init_policy(session)
+    
     async with db_service.with_session() as session:
         settings_service = get_service(ServiceType.SETTINGS_SERVICE)
         await setup_superuser(settings_service, session)

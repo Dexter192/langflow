@@ -124,6 +124,8 @@ dependencies = [
     "opik>=1.6.3",
     "openai>=1.68.2",
     "twelvelabs>=0.4.7",
+    "casbin>=1.41.0",
+    "casbin_sqlalchemy_adapter>=1.4.0"
 ]
 
 [dependency-groups]
@@ -172,6 +174,8 @@ dev = [
     "elevenlabs>=1.52.0",
     "faker>=37.0.0",
     "pytest-timeout>=2.3.1",
+    "casbin>=1.41.0",
+    "casbin_sqlalchemy_adapter>=1.4.0"
 ]
 
 [tool.uv.sources]
